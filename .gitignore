@@ -1,0 +1,19 @@
+# 永远不进 git
+.env
+.env.*
+*.key
+*.pem
+node_modules/
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# wrangler 本地缓存
+.wrangler/
+.dev.vars
+
+# IDE
+.vscode/
+.idea/
