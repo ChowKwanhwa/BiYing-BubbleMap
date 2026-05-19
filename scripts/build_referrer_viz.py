@@ -449,6 +449,7 @@ const simulation = d3.forceSimulation(data.nodes)
 let selected = null;
 let highlightUp = new Set();
 let highlightDown = new Set();
+const labelBoxes = [];  // 画布上文字标签的世界坐标命中框,由 draw() 每次刷新
 
 // —— 缩放/平移: 同一个 zoom 行为对象 ——
 let transform = d3.zoomIdentity.translate(W / 2, H / 2).scale(0.85);
@@ -1034,8 +1035,10 @@ function draw() {
   }
 
   // 标签: Top 50 + Genesis + selected + 任何有 alias 的地址
-  ctx.font = (10 / transform.k).toString() + "px -apple-system, sans-serif";
+  const fontSize = 10 / transform.k;
+  ctx.font = fontSize + "px -apple-system, sans-serif";
   ctx.textAlign = "left";
+  labelBoxes.length = 0;  // 重置标签点击命中框(给 click 用)
   for (const n of data.nodes) {
     const al = getAlias(n.id);
     if (!n.is_top50 && !n.is_genesis && selected !== n.id && !al) continue;
@@ -1055,7 +1058,12 @@ function draw() {
     ctx.fillStyle = al
       ? aliasColor(n.id)
       : (n.is_genesis ? "#fde047" : (selected === n.id ? "#fafafa" : "rgba(250,250,250,0.85)"));
-    ctx.fillText(label, n.x + r + 2, n.y + 3);
+    const tx = n.x + r + 2;
+    const ty = n.y + 3;
+    ctx.fillText(label, tx, ty);
+    // 记下世界坐标的标签边界框 (用于 click 命中)
+    const w = ctx.measureText(label).width;
+    labelBoxes.push({ id: n.id, x1: tx, y1: ty - fontSize, x2: tx + w, y2: ty + 2 });
   }
 
   ctx.restore();
@@ -1068,12 +1076,20 @@ canvas.addEventListener("click", (e) => {
   const rect = canvas.getBoundingClientRect();
   const wx = (e.clientX - rect.left - transform.x) / transform.k;
   const wy = (e.clientY - rect.top - transform.y) / transform.k;
+  // 1) 圆形命中(优先)
   for (const n of data.nodes) {
     if (n.x === undefined) continue;
     const r = nodeRadius(n) + 1;
     const dx = n.x - wx, dy = n.y - wy;
     if (dx * dx + dy * dy <= r * r) {
       selectNode(n.id);
+      return;
+    }
+  }
+  // 2) 文字标签命中(团队长名字、Top50、Genesis 等)
+  for (const b of labelBoxes) {
+    if (wx >= b.x1 && wx <= b.x2 && wy >= b.y1 && wy <= b.y2) {
+      selectNode(b.id);
       return;
     }
   }
@@ -1085,11 +1101,21 @@ canvas.addEventListener("mousemove", (e) => {
   const wx = (e.clientX - rect.left - transform.x) / transform.k;
   const wy = (e.clientY - rect.top - transform.y) / transform.k;
   let found = null;
+  // 圆形命中
   for (const n of data.nodes) {
     if (n.x === undefined) continue;
     const r = nodeRadius(n) + 1;
     const dx = n.x - wx, dy = n.y - wy;
     if (dx * dx + dy * dy <= r * r) { found = n; break; }
+  }
+  // 文字标签命中(团队长名字)
+  if (!found) {
+    for (const b of labelBoxes) {
+      if (wx >= b.x1 && wx <= b.x2 && wy >= b.y1 && wy <= b.y2) {
+        found = nodeById.get(b.id);
+        break;
+      }
+    }
   }
   if (found) {
     canvas.style.cursor = "pointer";
