@@ -887,108 +887,249 @@ function downloadDetails(addr, fmt) {
     filename = `referrer_${shortF}_${ts}.csv`;
   }
   if (fmt === "docx") {
-    // Word HTML 格式: Word / Pages / Google Docs 都能打开
+    // —— 叙事化复盘报告(给老板看)。Word HTML 格式: Word / Pages / Google Docs 都能打开 ——
     const focusNode = nodeById.get(addr);
     const focusAlias = getAlias(addr);
-    const headers = [
-      "类型", "层级", "地址", "别名",
-      "累计 stake (U)", "累计 unstake (U)",
-      "钱包总收款 (U)", "分润奖励 (U)",
-      "在押本金 (U)", "应赔付 (U)",
-      "已实现盈亏 含分润 (U)"
-    ];
-    const kindZh = { focus: "焦点", upline: "上线", downline: "下线" };
-    const layerStr = (r) => r.kind === "focus" ? "—" : (r.kind === "upline" ? "↑" + r.layer : "↓" + r.layer);
-    const fmtN = (v) => (typeof v === "number" ? v.toLocaleString("en-US", {maximumFractionDigits: 2}) : v);
-    const pnlColor = (v) => v > 0.01 ? "#16a34a" : (v < -0.01 ? "#dc2626" : "#525252");
-
-    const rowHtml = (r) => {
-      const tone = r.kind === "focus" ? "background:#fef3c7;font-weight:600"
-        : r.kind === "upline" ? "background:#fef9c3" : "";
-      return `<tr style="${tone}">
-        <td>${kindZh[r.kind] || r.kind}</td>
-        <td>${layerStr(r)}</td>
-        <td style="font-family:Consolas,monospace;font-size:10pt">${r.address}</td>
-        <td style="color:#ca8a04">${escapeHtml(getAlias(r.address) || "")}</td>
-        <td style="text-align:right">${fmtN(r.stake)}</td>
-        <td style="text-align:right">${fmtN(r.unstake)}</td>
-        <td style="text-align:right">${fmtN(r.wallet_in_total)}</td>
-        <td style="text-align:right">${fmtN(r.commission_etc)}</td>
-        <td style="text-align:right">${fmtN(r.in_stake)}</td>
-        <td style="text-align:right">${fmtN(r.owed)}</td>
-        <td style="text-align:right;color:${pnlColor(r.realized_pnl)}">${r.realized_pnl >= 0 ? "+" : ""}${fmtN(r.realized_pnl)}</td>
-      </tr>`;
-    };
-
     const upRows = rows.filter(r => r.kind === "upline");
     const downRows = rows.filter(r => r.kind === "downline");
     const focusRow = rows.find(r => r.kind === "focus");
 
-    // 计算伞下汇总
-    const agg = umbrellaAggregate(addr, descendantsOf(addr, 100));
+    // —— 派生指标 ——
+    const desc = descendantsOf(addr, 100);
+    const agg = umbrellaAggregate(addr, desc);
+    const stakeOnlyPnl = focusRow.unstake - focusRow.stake;  // 不含分润,只看 stake 本身赚没赚
+    const commission = focusRow.commission_etc;
+    const totalNetCash = focusRow.wallet_in_total - focusRow.stake;
+    // 直推数量
+    const directDowns = (childrenMap.get(addr) || []).length;
+    // 伞下层数
+    const subtreeDepth = desc.layers.length;
+    // 上线第 1 层(直接 referrer)
+    const upline1 = upRows[0] ? upRows[0].address : null;
+    const upline1Node = upline1 ? nodeById.get(upline1) : null;
+    const upline1Alias = upline1 ? getAlias(upline1) : null;
+    // 刷子检测: 下线按 (stake金额取整, 实现盈亏取整) 分组,group ≥ 3 算雷同
+    const fingerprintMap = new Map();
+    for (const r of downRows) {
+      const key = Math.round(r.stake) + "/" + Math.round(r.realized_pnl);
+      const arr = fingerprintMap.get(key) || [];
+      arr.push(r);
+      fingerprintMap.set(key, arr);
+    }
+    const suspectGroups = [...fingerprintMap.entries()]
+      .filter(([_, arr]) => arr.length >= 3)
+      .sort((a, b) => b[1].length - a[1].length);
+    const totalSuspect = suspectGroups.reduce((s, [_, arr]) => s + arr.length, 0);
 
+    // —— 格式化 helper ——
+    const fmtN = (v) => (typeof v === "number" ? v.toLocaleString("en-US", { maximumFractionDigits: 2 }) : v);
+    const pnlColor = (v) => v > 0.01 ? "#16a34a" : (v < -0.01 ? "#dc2626" : "#525252");
+    const pnlSign = (v) => (v >= 0 ? "+" : "") + fmtN(v);
+    const shortHash = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+    const dateStr = ts.split("T")[0];
+
+    // —— 一句话结论(自动生成)——
+    let oneLineConclusion = "";
+    if (totalNetCash > 0 && commission > 0 && commission > Math.abs(stakeOnlyPnl)) {
+      // 团队长靠分润赚
+      oneLineConclusion = `<b>${escapeHtml(focusAlias || shortHash(addr))} 自己净赚 ${fmtN(totalNetCash)} U,但他靠的不是自己 stake 收益 —— 自己 stake 实际亏 ${fmtN(-stakeOnlyPnl)} U,全部利润来自下线分润 ${fmtN(commission)} U。本质上是中间商抽水。</b>`;
+    } else if (totalNetCash > 0) {
+      oneLineConclusion = `<b>${escapeHtml(focusAlias || shortHash(addr))} 净赚 ${fmtN(totalNetCash)} U,其中自己 stake 收益 ${fmtN(stakeOnlyPnl)} U,分润奖励 ${fmtN(commission)} U。</b>`;
+    } else if (totalNetCash < 0) {
+      oneLineConclusion = `<b>${escapeHtml(focusAlias || shortHash(addr))} 净亏 ${fmtN(-totalNetCash)} U,其中 stake 已实现亏损 ${fmtN(-stakeOnlyPnl)} U,分润奖励仅 ${fmtN(commission)} U(不足以弥补)。在押 ${fmtN(focusRow.in_stake)} U 锁在合约里。</b>`;
+    } else {
+      oneLineConclusion = `<b>${escapeHtml(focusAlias || shortHash(addr))} 盈亏几乎打平。</b>`;
+    }
+    // 伞下层信息
+    if (agg.count_total > 1) {
+      const dnLoss = agg.realized_pnl - focusRow.pnl;  // 下线合计盈亏(伞下减去焦点)
+      const dnLocked = agg.in_stake - focusRow.in_stake;
+      if (dnLoss < 0) {
+        oneLineConclusion += `<br/>但他名下的 ${agg.count_total - 1} 个下线合计 <b style="color:#dc2626">亏 ${fmtN(-dnLoss)} U</b>,还有 <b>${fmtN(dnLocked)} U</b> 本金锁在合约。`;
+      } else if (dnLoss > 0 && agg.count_total > 5) {
+        oneLineConclusion += `<br/>下面 ${agg.count_total - 1} 个下线整体净赚 ${fmtN(dnLoss)} U。`;
+      }
+    }
+
+    // —— 下线表格(限制 30 行,剩下汇总成 1 行)——
+    const downSorted = downRows.slice().sort((a, b) => Math.abs(b.realized_pnl) - Math.abs(a.realized_pnl));
+    const TOP_DOWN_LIMIT = 30;
+    const downHead = downSorted.slice(0, TOP_DOWN_LIMIT);
+    const downTail = downSorted.slice(TOP_DOWN_LIMIT);
+    const downTailAgg = downTail.reduce((acc, r) => ({
+      n: acc.n + 1,
+      stake: acc.stake + r.stake,
+      unstake: acc.unstake + r.unstake,
+      wallet: acc.wallet + r.wallet_in_total,
+      pnl: acc.pnl + r.realized_pnl,
+      lock: acc.lock + r.in_stake,
+    }), { n: 0, stake: 0, unstake: 0, wallet: 0, pnl: 0, lock: 0 });
+
+    const downRowHtml = (r) => {
+      const al = getAlias(r.address);
+      return `<tr>
+        <td style="font-family:Consolas,monospace;font-size:10pt">${shortHash(r.address)}${al ? ` <span style="color:#ca8a04">(${escapeHtml(al)})</span>` : ""}</td>
+        <td style="text-align:right">${fmtN(r.stake)}</td>
+        <td style="text-align:right">${fmtN(r.wallet_in_total)}</td>
+        <td style="text-align:right;color:${pnlColor(r.realized_pnl)};font-weight:500">${pnlSign(r.realized_pnl)}</td>
+        <td style="text-align:right">${fmtN(r.in_stake)}</td>
+      </tr>`;
+    };
+
+    // —— 完整报告 HTML ——
     const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
-<head><meta charset="utf-8"><title>必赢 referrer 明细</title>
+<head><meta charset="utf-8"><title>${escapeHtml(focusAlias || shortHash(addr))} 团队复盘报告</title>
 <style>
-  body { font-family: "Microsoft YaHei","PingFang SC","Arial",sans-serif; font-size:11pt; color:#171717; }
-  h1 { font-size:18pt; margin:0 0 6pt 0; }
-  h2 { font-size:14pt; margin:18pt 0 6pt 0; color:#0f172a; border-bottom:1px solid #cbd5e1; padding-bottom:3pt; }
-  .meta { color:#525252; font-size:10pt; margin-bottom:18pt; }
-  .stat-grid { width:100%; border-collapse:collapse; margin:8pt 0; }
-  .stat-grid td { padding:4pt 8pt; border:1px solid #e5e5e5; vertical-align:top; }
-  .stat-grid td:first-child { background:#f5f5f4; font-weight:500; width:30%; }
-  table.detail { width:100%; border-collapse:collapse; margin-top:8pt; font-size:10pt; }
-  table.detail th { background:#1e293b; color:#fff; padding:5pt 6pt; text-align:left; font-weight:500; }
-  table.detail td { padding:4pt 6pt; border:0.5pt solid #e5e5e5; }
+  body { font-family: "Microsoft YaHei","PingFang SC","Arial",sans-serif; font-size:11pt; color:#171717; line-height:1.6; }
+  h1 { font-size:20pt; margin:0 0 4pt 0; color:#0f172a; }
+  h2 { font-size:14pt; margin:22pt 0 6pt 0; color:#0f172a; padding-bottom:3pt; border-bottom:1px solid #cbd5e1; }
+  .meta { color:#525252; font-size:10pt; margin-bottom:8pt; }
+  .hr { border-top:2px solid #e5e5e5; margin:14pt 0; }
+  .lead { font-size:12pt; color:#0f172a; background:#fef9c3; padding:10pt 14pt; border-left:4pt solid #ca8a04; margin:10pt 0 16pt; line-height:1.7; }
+  table { border-collapse:collapse; width:100%; margin:6pt 0; font-size:10.5pt; }
+  table.kv td { padding:4pt 10pt; border:1px solid #e5e5e5; vertical-align:top; }
+  table.kv td:first-child { background:#f5f5f4; font-weight:500; width:38%; color:#0f172a; }
+  table.flow { margin:6pt 0; }
+  table.flow th { background:#f1f5f9; color:#0f172a; padding:5pt 8pt; text-align:left; border:0.5pt solid #cbd5e1; }
+  table.flow td { padding:4pt 8pt; border:0.5pt solid #e5e5e5; }
+  table.flow td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  table.detail th { background:#1e293b; color:#fff; padding:5pt 8pt; text-align:left; }
+  table.detail td { padding:4pt 8pt; border:0.5pt solid #e5e5e5; }
+  table.detail tr.subtotal td { background:#fef3c7; font-weight:600; }
+  .warn { background:#fef2f2; border-left:3pt solid #dc2626; padding:6pt 10pt; margin:6pt 0; color:#7f1d1d; }
+  .ok   { background:#f0fdf4; border-left:3pt solid #16a34a; padding:6pt 10pt; margin:6pt 0; color:#14532d; }
+  .checklist li { margin:4pt 0; }
 </style>
 </head>
 <body>
-<h1>必赢 referrer 明细 — ${escapeHtml(focusAlias || addr)}</h1>
+
+<h1>${escapeHtml(focusAlias || shortHash(addr))} 团队复盘报告</h1>
 <div class="meta">
-  地址 <span style="font-family:Consolas,monospace">${addr}</span> · 深度 ${focusNode.depth} · 生成 ${ts.replace(/-/g, ":").replace(/T/, " ")} ·
-  本人 ${upRows.length} 层上线 · ${downRows.length} 个下线
+<b>生成日期</b>: ${dateStr} · <b>数据截止</b>: 2026-05-19 23:59 CST (崩盘赔付盘点 v6.1) · <b>钱包地址</b>: <span style="font-family:Consolas,monospace">${addr}</span>
 </div>
 
-<h2>① 焦点本人统计</h2>
-<table class="stat-grid">
-  <tr><td>累计 stake</td><td>${fmtN(focusRow.stake)} U</td></tr>
-  <tr><td>累计 unstake (合约口径)</td><td>${fmtN(focusRow.unstake)} U</td></tr>
-  <tr><td>钱包总收款 (含分润)</td><td>${fmtN(focusRow.wallet_in_total)} U &nbsp;(${focusRow.wallet_in_count} 笔)</td></tr>
-  <tr><td>&nbsp;&nbsp;&nbsp;其中分润奖励</td><td>${fmtN(focusRow.commission_etc)} U</td></tr>
-  <tr><td>在押本金</td><td>${fmtN(focusRow.in_stake)} U</td></tr>
-  <tr><td>疑似被盗本金</td><td>${fmtN(focusRow.stolen)} U</td></tr>
-  <tr><td>应赔付总额</td><td>${fmtN(focusRow.owed)} U</td></tr>
-  <tr><td><b>已实现盈亏 (含分润)</b></td><td style="color:${pnlColor(focusRow.realized_pnl)};font-weight:600">${focusRow.realized_pnl >= 0 ? "+" : ""}${fmtN(focusRow.realized_pnl)} U</td></tr>
+<div class="hr"></div>
+
+<h2>一、一句话结论</h2>
+<div class="lead">${oneLineConclusion}</div>
+
+<h2>二、这个人是谁</h2>
+<table class="kv">
+  <tr><td>钱包地址</td><td style="font-family:Consolas,monospace">${addr}</td></tr>
+  ${focusAlias ? `<tr><td>别名</td><td><b>${escapeHtml(focusAlias)}</b></td></tr>` : ""}
+  <tr><td>在推荐树里的位置</td><td>第 <b>${focusNode.depth}</b> 层(离 Genesis 隔 ${focusNode.depth} 层上线)</td></tr>
+  ${upline1Node ? `<tr><td>直接上线</td><td><span style="font-family:Consolas,monospace">${shortHash(upline1)}</span>${upline1Alias ? ` <b style="color:#ca8a04">(${escapeHtml(upline1Alias)})</b>` : ""}(第 ${upline1Node.depth} 层)</td></tr>` : ""}
+  <tr><td>直接拉的下线</td><td><b>${directDowns}</b> 个</td></tr>
+  <tr><td>下线再发展的下线</td><td>${Math.max(0, downRows.length - directDowns)} 个</td></tr>
+  <tr><td>伞下总规模</td><td>${agg.count_total} 个钱包(含本人) · 深度 ${subtreeDepth} 层</td></tr>
 </table>
 
-<h2>② 伞下汇总 (焦点 + ${agg.count_total - 1} 个下线)</h2>
-<table class="stat-grid">
-  <tr><td>伞下总人数</td><td>${agg.count_total}</td></tr>
-  <tr><td>盈利 / 亏损 / 被盗</td><td><span style="color:#16a34a">${agg.count_profit}</span> / <span style="color:#dc2626">${agg.count_loss}</span> / <span style="color:#525252">${agg.count_stolen}</span></td></tr>
+<h2>三、团队规模与构成</h2>
+<table class="kv">
+  <tr><td>总钱包数(含本人)</td><td><b>${agg.count_total}</b></td></tr>
+  <tr><td>盈利 / 亏损 / 疑似被盗</td>
+    <td><span style="color:#16a34a;font-weight:500">${agg.count_profit}</span> /
+        <span style="color:#dc2626;font-weight:500">${agg.count_loss}</span> /
+        <span style="color:#525252;font-weight:500">${agg.count_stolen}</span></td></tr>
   <tr><td>累计 stake (伞下)</td><td>${fmtN(agg.stake)} U</td></tr>
-  <tr><td>累计 unstake (伞下)</td><td>${fmtN(agg.unstake)} U</td></tr>
-  <tr><td>钱包总收款 (伞下)</td><td>${fmtN(agg.wallet_in_total)} U</td></tr>
-  <tr><td>&nbsp;&nbsp;&nbsp;其中分润奖励 (伞下)</td><td>${fmtN(agg.commission_etc)} U</td></tr>
-  <tr><td>在押本金 (伞下)</td><td>${fmtN(agg.in_stake)} U</td></tr>
-  <tr><td>应赔付总额 (伞下)</td><td>${fmtN(agg.owed)} U</td></tr>
-  <tr><td><b>已实现盈亏 (含分润, 伞下)</b></td><td style="color:${pnlColor(agg.realized_pnl)};font-weight:600">${agg.realized_pnl >= 0 ? "+" : ""}${fmtN(agg.realized_pnl)} U</td></tr>
+  <tr><td>钱包总收款 (伞下,含分润)</td><td>${fmtN(agg.wallet_in_total)} U</td></tr>
+  <tr><td>在押本金 (伞下,锁在合约)</td><td><b>${fmtN(agg.in_stake)} U</b></td></tr>
+</table>
+${suspectGroups.length > 0 ? `
+<div class="warn">
+  ⚠️ <b>疑似刷子团队</b> —— 下线里有 ${totalSuspect} 个钱包的 stake 金额 + 盈亏指纹高度雷同:
+  <ul>${suspectGroups.slice(0, 5).map(([key, arr]) => {
+    const [s, p] = key.split("/");
+    return `<li><b>${arr.length}</b> 个钱包各投 ${fmtN(Number(s))} U,各盈亏 ${pnlSign(Number(p))} U(完全相同的指纹)</li>`;
+  }).join("")}</ul>
+  这些高度雷同的钱包大概率是同一控制人开的小号,链上推荐树识别不出,建议做地址聚类核查。
+</div>` : ""}
+
+<h2>四、钱去哪了:总资金流</h2>
+<table class="flow">
+<tr><th>维度</th><th style="text-align:right">金额 (USDT)</th></tr>
+<tr><td>${agg.count_total} 个钱包总投入(累计 stake)</td><td class="num">${fmtN(agg.stake)}</td></tr>
+<tr><td>${agg.count_total} 个钱包总拿回(钱包总收款,含 unstake + 分润)</td><td class="num">${fmtN(agg.wallet_in_total)}</td></tr>
+<tr><td><b>净盈亏 (投−拿)</b></td><td class="num" style="color:${pnlColor(agg.realized_pnl)};font-weight:600">${pnlSign(agg.realized_pnl)}</td></tr>
+<tr><td>还锁在合约拿不回的本金(在押)</td><td class="num"><b>${fmtN(agg.in_stake)}</b></td></tr>
+${agg.stolen > 0 ? `<tr><td>疑似被盗本金(剔除,不赔付)</td><td class="num">${fmtN(agg.stolen)}</td></tr>` : ""}
+<tr><td>v6.1 方案应赔付总额</td><td class="num">${fmtN(agg.owed)}</td></tr>
 </table>
 
-<h2>③ 上线链 (${upRows.length} 层 → Genesis)</h2>
-<table class="detail">
-  <tr><th>${headers.join("</th><th>")}</th></tr>
-  ${upRows.map(rowHtml).join("")}
+<h2>五、${escapeHtml(focusAlias || "焦点本人")} 是怎么赚 ${totalNetCash >= 0 ? "/亏" : ""} 到钱的</h2>
+<p>${escapeHtml(focusAlias || "他")}自己投了 ${fmtN(focusRow.stake)} U,${commission > 0.01 ? "有两条收入线:" : "只有一条收入线:"}</p>
+<table class="flow">
+<tr><th>收入项</th><th style="text-align:right">金额 (USDT)</th></tr>
+<tr><td>① 自己 stake unstake 拿回(合约口径)</td><td class="num">${fmtN(focusRow.unstake)}</td></tr>
+${commission > 0.01 ? `<tr><td>② 从下线身上抽的分润<br/><span style="color:#525252;font-size:9.5pt">(直推奖 + 级差 + 节点分红)</span></td><td class="num" style="color:#16a34a;font-weight:600">+${fmtN(commission)}</td></tr>` : ""}
+<tr><td><b>合计从合约拿走</b></td><td class="num"><b>${fmtN(focusRow.wallet_in_total)}</b></td></tr>
+<tr><td>减去自己投入</td><td class="num">−${fmtN(focusRow.stake)}</td></tr>
+<tr class="subtotal"><td><b>${escapeHtml(focusAlias || "他")}净现金流</b></td><td class="num" style="color:${pnlColor(totalNetCash)}"><b>${pnlSign(totalNetCash)}</b></td></tr>
+${focusRow.in_stake > 0 ? `<tr><td><i>(另有 ${fmtN(focusRow.in_stake)} U 本金锁在合约)</i></td><td></td></tr>` : ""}
 </table>
 
-<h2>④ 下线树 (${downRows.length} 人, 按层级排序)</h2>
+${commission > 0.01 && stakeOnlyPnl < -0.01 ? `
+<div class="warn">
+<b>关键事实</b>:
+<ul>
+<li>${escapeHtml(focusAlias || "他")}自己 stake 的部分实际净亏 <b>${fmtN(-stakeOnlyPnl)} U</b></li>
+<li>但他作为 ${directDowns} 个下线的上线,<b>白拿了 ${fmtN(commission)} U 推荐奖</b></li>
+<li>两者相抵后 <b style="color:#16a34a">倒赚 ${fmtN(totalNetCash)} U</b></li>
+</ul>
+</div>` : ""}
+
+${downRows.length > 0 ? `
+<h2>六、下线的真实情况 (按盈亏绝对值排序,显示 Top ${Math.min(downRows.length, TOP_DOWN_LIMIT)})</h2>
 <table class="detail">
-  <tr><th>${headers.join("</th><th>")}</th></tr>
-  ${downRows.map(rowHtml).join("")}
+<tr><th>下线钱包</th><th style="text-align:right">投入</th><th style="text-align:right">拿回</th><th style="text-align:right">净盈亏</th><th style="text-align:right">锁仓</th></tr>
+${downHead.map(downRowHtml).join("")}
+${downTail.length > 0 ? `<tr class="subtotal"><td>… 其余 ${downTail.n || downTail.length} 个小额下线汇总 …</td>
+  <td class="num" style="text-align:right">${fmtN(downTailAgg.stake)}</td>
+  <td class="num" style="text-align:right">${fmtN(downTailAgg.wallet)}</td>
+  <td class="num" style="text-align:right;color:${pnlColor(downTailAgg.pnl)}">${pnlSign(downTailAgg.pnl)}</td>
+  <td class="num" style="text-align:right">${fmtN(downTailAgg.lock)}</td></tr>` : ""}
+<tr class="subtotal"><td><b>${downRows.length} 个下线合计</b></td>
+  <td class="num" style="text-align:right"><b>${fmtN(agg.stake - focusRow.stake)}</b></td>
+  <td class="num" style="text-align:right"><b>${fmtN(agg.wallet_in_total - focusRow.wallet_in_total)}</b></td>
+  <td class="num" style="text-align:right;color:${pnlColor(agg.realized_pnl - focusRow.pnl)}"><b>${pnlSign(agg.realized_pnl - focusRow.pnl)}</b></td>
+  <td class="num" style="text-align:right"><b>${fmtN(agg.in_stake - focusRow.in_stake)}</b></td></tr>
 </table>
+` : ""}
+
+<h2>七、关键判断</h2>
+<ol>
+${totalNetCash > 0 ? `<li><b>${escapeHtml(focusAlias || "焦点")} 是这盘的赢家</b>:现金视角净赚 ${fmtN(totalNetCash)} U。</li>` :
+  totalNetCash < 0 ? `<li><b>${escapeHtml(focusAlias || "焦点")} 是亏损方</b>:现金视角净亏 ${fmtN(-totalNetCash)} U,且 ${fmtN(focusRow.in_stake)} U 本金锁在合约。</li>` :
+  `<li>${escapeHtml(focusAlias || "焦点")} 盈亏接近打平。</li>`}
+${commission > 0.01 && commission > Math.abs(stakeOnlyPnl) ? `<li><b>${escapeHtml(focusAlias || "焦点")} 不是被骗者</b>:他的"赚"几乎全部来自下线交的推荐奖,不是 stake 收益。本质上是 zero-sum 抽水的中间商。</li>` : ""}
+${suspectGroups.length > 0 ? `<li><b>疑似自买自卖</b>:${agg.count_total} 个钱包里至少 ${totalSuspect} 个指纹完全一致,地址聚类高度可疑,需要做资金来源簇分析确认实际有几个真人。</li>` : ""}
+${agg.in_stake > 0 ? `<li><b>真实损失敞口</b>:项目崩盘后,${escapeHtml(focusAlias || "该")}团队 ${agg.count_total} 个钱包合计锁着 <b>${fmtN(agg.in_stake)} U</b> 本金拿不回。</li>` : ""}
+</ol>
+
+<h2>八、建议下一步</h2>
+<ul class="checklist">
+${suspectGroups.length > 0 ? `<li>☐ <b>地址聚类</b>:查 ${agg.count_total} 个钱包的 Gas 来源、初始资金来源簇,确认哪几个钱包是${escapeHtml(focusAlias || "焦点")}本人控制</li>` : ""}
+${totalNetCash > 0 && (suspectGroups.length > 0 || commission > Math.abs(stakeOnlyPnl)) ? `<li>☐ <b>赔付判定</b>:如${escapeHtml(focusAlias || "焦点")}自身已盈利且下线多为本人小号,可考虑在赔付名单里整团剔除(按"赚的不秋后算账,疑似刷子不补偿"原则)</li>` : ""}
+${upline1Node ? `<li>☐ <b>追溯上游</b>:${escapeHtml(focusAlias || "焦点")}的直接上线 <span style="font-family:Consolas,monospace">${shortHash(upline1)}</span>${upline1Alias ? ` (${escapeHtml(upline1Alias)})` : ""} 净盈亏 ${pnlSign(upline1Node.pnl)} U,整条向上 ${upRows.length} 层上线,建议顺藤梳理大团长是谁</li>` : ""}
+${agg.in_stake > 0 ? `<li>☐ <b>赔付兑现</b>:伞下 ${fmtN(agg.owed)} U 应赔付额是否纳入老板的赔付盘子</li>` : ""}
+</ul>
+
+<h2>附:数据口径说明</h2>
+<ul style="font-size:10pt;color:#525252">
+<li><b>累计 stake (投入 A)</b>:钱包打给 Staking 合约的 USDT 总额(含 stake 滑点 5%)</li>
+<li><b>钱包总收款 (拿回 B)</b>:Staking 合约 + 3 个分润池打回钱包的 USDT 总额(含 unstake + 推荐奖 + 级差 + 节点分红)</li>
+<li><b>unstake 到账</b>:单纯 stake 订单 unstake 时实际到账金额,不含分润</li>
+<li><b>分润 = B − unstake</b>:作为上线身份吃到的推荐奖、级差、节点分红</li>
+<li><b>已实现盈亏(含分润)= B − A</b>:钱包真实现金流盈亏</li>
+<li><b>在押本金</b>:合约 records 中 status=false(未 unstake)的本金合计</li>
+<li><b>应赔付总额</b>:按 v6.1 方案 = 在押本金 × (1 + 静态利率 × 已 stake 天数 / 档位天数),崩盘后不再计息</li>
+<li><b>疑似被盗</b>:stake 后 ≥ 60 天 + 已到期 + 未 unstake,默认私钥丢失,剔除不赔</li>
+</ul>
+<p style="color:#525252;font-size:10pt">完整明细见同时下载的 <b>CSV</b> 或 <b>Excel</b> 文件,本文档为叙事化复盘报告,仅给老板/决策层阅读。</p>
 
 </body></html>`;
     blob = new Blob(["﻿" + html], { type: "application/msword;charset=utf-8" });
-    filename = `referrer_${shortF}_${ts}.doc`;
+    filename = `团队复盘报告_${escapeHtml(focusAlias || shortHash(addr))}_${ts}.doc`;
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
