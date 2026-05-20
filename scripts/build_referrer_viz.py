@@ -164,6 +164,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>必赢全网 referrer BubbleMap</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   html, body { margin:0; padding:0; background:#0a0a0a; color:#e5e5e5; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:hidden; }
   #header { position:fixed; top:0; left:0; right:0; padding:10px 16px; background:rgba(10,10,10,0.85); border-bottom:1px solid #222; z-index:10; display:flex; align-items:center; gap:16px; font-size:13px; }
@@ -604,8 +605,8 @@ function renderPanel(addr, desc) {
   }
   html += `<div class="actions">
     <button data-action="download-csv" title="下载该地址 + 全部上线 + 全部下线的明细 CSV">⬇ CSV</button>
+    <button class="secondary" data-action="download-xlsx" title="Excel 文件 (.xlsx,带格式 + 多 sheet)">⬇ Excel</button>
     <button class="secondary" data-action="download-docx" title="Word 文档(Word / Pages / Google Docs 可直接打开)">⬇ Word</button>
-    <button class="secondary" data-action="download-json" title="JSON 格式(含所有字段,开发用)">⬇ JSON</button>
   </div>`;
   html += `</div>`;
 
@@ -697,7 +698,7 @@ function renderPanel(addr, desc) {
     btn.onclick = () => {
       const action = btn.getAttribute("data-action");
       if (action === "download-csv") downloadDetails(addr, "csv");
-      else if (action === "download-json") downloadDetails(addr, "json");
+      else if (action === "download-xlsx") downloadDetails(addr, "xlsx");
       else if (action === "download-docx") downloadDetails(addr, "docx");
     };
   });
@@ -770,15 +771,84 @@ function downloadDetails(addr, fmt) {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const shortF = addr.slice(0, 6) + "_" + addr.slice(-4);
   let blob, filename;
-  if (fmt === "json") {
-    const out = {
-      focus: addr,
-      generated: ts,
-      stats: { uplines: rows.filter(r => r.kind === "upline").length, downlines: rows.filter(r => r.kind === "downline").length },
-      rows,
-    };
-    blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json;charset=utf-8" });
-    filename = `referrer_${shortF}_${ts}.json`;
+  if (fmt === "xlsx") {
+    // —— Excel 文件: 用 SheetJS,3 个 sheet (摘要 + 上线链 + 下线树) ——
+    if (typeof XLSX === "undefined") {
+      alert("Excel 库未加载,请检查网络后刷新页面再试");
+      return;
+    }
+    const focusNode = nodeById.get(addr);
+    const focusAlias = getAlias(addr);
+    const desc = descendantsOf(addr, 100);
+    const agg = umbrellaAggregate(addr, desc);
+    const upRows = rows.filter(r => r.kind === "upline");
+    const downRows = rows.filter(r => r.kind === "downline");
+    const num = (v) => typeof v === "number" ? Number(v.toFixed(4)) : v;
+    const kindZh = { focus: "焦点", upline: "上线", downline: "下线" };
+    const layerStr = (r) => r.kind === "focus" ? 0 : (r.kind === "upline" ? "↑" + r.layer : "↓" + r.layer);
+
+    // Sheet 1: 摘要(焦点 + 伞下汇总)
+    const summary = [
+      ["字段", "焦点本人", "伞下汇总(含焦点)"],
+      ["别名", focusAlias || "", ""],
+      ["地址", addr, ""],
+      ["身份", focusNode.is_genesis ? "GENESIS" : (focusNode.is_participant ? (focusNode.is_top50 ? "Top 50 大户" : "参与者") : "祖先"), ""],
+      ["在 referrer 树深度", focusNode.depth, ""],
+      ["上线链层数", upRows.length, ""],
+      ["伞下总人数(含本人)", "", agg.count_total],
+      ["盈利人数(伞下)", "", agg.count_profit],
+      ["亏损人数(伞下)", "", agg.count_loss],
+      ["疑似被盗人数(伞下)", "", agg.count_stolen],
+      ["累计 stake (U)", num(focusNode.stake), num(agg.stake)],
+      ["累计 unstake (U)", num(focusNode.unstake), num(agg.unstake)],
+      ["钱包总收款 (U)", num(focusNode.wallet_in_total), num(agg.wallet_in_total)],
+      ["其中分润奖励 (U)", num(focusNode.commission_etc), num(agg.commission_etc)],
+      ["钱包收款笔数", focusNode.wallet_in_count, ""],
+      ["在押本金 (U)", num(focusNode.in_stake), num(agg.in_stake)],
+      ["疑似被盗本金 (U)", num(focusNode.stolen), num(agg.stolen)],
+      ["应赔付总额 (U)", num(focusNode.owed), num(agg.owed)],
+      ["已实现盈亏 含分润 (U)", num(focusNode.pnl), num(agg.realized_pnl)],
+    ];
+
+    const headers = [
+      "类型", "层级", "地址", "别名", "深度", "是否Top50",
+      "累计stake(U)", "累计unstake(U)",
+      "钱包总收款(U)", "钱包收款笔数", "分润奖励(U)",
+      "在押本金(U)", "疑似被盗本金(U)", "应赔付总额(U)",
+      "已实现盈亏(含分润)(U)"
+    ];
+    const rowToArr = (r) => [
+      kindZh[r.kind] || r.kind,
+      layerStr(r),
+      r.address,
+      getAlias(r.address) || "",
+      r.depth_in_tree,
+      r.is_top50 ? "是" : "",
+      num(r.stake), num(r.unstake),
+      num(r.wallet_in_total), r.wallet_in_count, num(r.commission_etc),
+      num(r.in_stake), num(r.stolen), num(r.owed),
+      num(r.realized_pnl),
+    ];
+
+    // Sheet 2: 上线链
+    const upRowsXlsx = [headers, ...rows.filter(r => r.kind === "focus" || r.kind === "upline").map(rowToArr)];
+    // Sheet 3: 下线树
+    const downRowsXlsx = [headers, ...rows.filter(r => r.kind === "focus" || r.kind === "downline").map(rowToArr)];
+
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet(summary);
+    ws1["!cols"] = [{ wch: 22 }, { wch: 48 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, ws1, "摘要");
+    const ws2 = XLSX.utils.aoa_to_sheet(upRowsXlsx);
+    ws2["!cols"] = [{wch:6},{wch:6},{wch:46},{wch:14},{wch:6},{wch:7},{wch:13},{wch:13},{wch:13},{wch:10},{wch:13},{wch:12},{wch:14},{wch:13},{wch:18}];
+    XLSX.utils.book_append_sheet(wb, ws2, "上线链");
+    const ws3 = XLSX.utils.aoa_to_sheet(downRowsXlsx);
+    ws3["!cols"] = ws2["!cols"];
+    XLSX.utils.book_append_sheet(wb, ws3, "下线树");
+
+    const xlsxBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    blob = new Blob([xlsxBuf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    filename = `referrer_${shortF}_${ts}.xlsx`;
   } else {
     const headers = [
       "类型", "层级", "地址", "别名", "在referrer树深度", "是否Genesis", "是否参与者", "是否Top50",
