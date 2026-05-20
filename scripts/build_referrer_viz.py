@@ -264,6 +264,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span><span class="dot" style="background:#ef4444"></span>已亏损 (待赔付)</span>
     <span><span class="dot" style="background:#6b7280"></span>疑似被盗</span>
     <span><span class="dot" style="background:#fde047"></span>Genesis</span>
+    <span style="color:#666">|</span>
+    <span><span class="dot" style="background:#a855f7"></span>上线链</span>
+    <span><span class="dot" style="background:#fbbf24"></span>下线树</span>
   </div>
   <input id="search" placeholder="粘贴地址 / 输入别名…" autocomplete="off" />
   <button id="alias-btn" title="管理地址别名">📒 别名</button>
@@ -984,16 +987,41 @@ function draw() {
   ctx.translate(transform.x, transform.y);
   ctx.scale(transform.k, transform.k);
 
-  // 边
+  // 边 — link 永远是 child→parent (src=child, dst=parent),所以判断方向时:
+  //   边在「焦点向上的祖先链」上 → 上线侧 → 紫色
+  //   边在「焦点向下的子树」内   → 下线侧 → 金色
+  // 这两个集合 highlightUp/highlightDown 不交叉(分别在焦点之上/之下)
   for (const l of links) {
     const s = l.source, t = l.target;
     if (!s || !t || s.x === undefined) continue;
-    const isHi = selected && (s.id === selected || t.id === selected ||
-      (highlightUp.has(s.id) && (highlightUp.has(t.id) || t.id === selected)) ||
-      (highlightDown.has(s.id) && t.id === selected) ||
-      (highlightDown.has(s.id) && highlightDown.has(t.id)));
-    ctx.strokeStyle = isHi ? "rgba(253,224,71,0.95)" : edgeColor(l.child);
-    ctx.lineWidth = (isHi ? 1.6 : 0.5) / transform.k;
+    let edgeMode = "normal";   // "normal" | "up" | "down"
+    if (selected) {
+      const sIsSelf = s.id === selected;
+      const tIsSelf = t.id === selected;
+      const sIsUp   = highlightUp.has(s.id);
+      const tIsUp   = highlightUp.has(t.id);
+      const sIsDown = highlightDown.has(s.id);
+      const tIsDown = highlightDown.has(t.id);
+      // 上线链上的边: child 是焦点/上线,parent 是上线 (dst=parent 是 up 或 dst=self & src 是 up 不可能因为 src=child)
+      // 边是 child→parent: 焦点本人的 parent 边 = (src=self, dst=upline) → 上线
+      // 上线链中间的边 = (src=upline, dst=upline) → 上线
+      // 下线树中的边 = (src=downline, dst=焦点 or downline) → 下线
+      if ((sIsSelf && tIsUp) || (sIsUp && tIsUp)) {
+        edgeMode = "up";
+      } else if ((sIsDown && tIsSelf) || (sIsDown && tIsDown)) {
+        edgeMode = "down";
+      }
+    }
+    if (edgeMode === "up") {
+      ctx.strokeStyle = "rgba(168,85,247,0.95)";    // 紫色 #a855f7
+      ctx.lineWidth = 1.8 / transform.k;
+    } else if (edgeMode === "down") {
+      ctx.strokeStyle = "rgba(251,191,36,0.95)";    // 金色 #fbbf24
+      ctx.lineWidth = 1.6 / transform.k;
+    } else {
+      ctx.strokeStyle = edgeColor(l.child);
+      ctx.lineWidth = 0.5 / transform.k;
+    }
     ctx.beginPath();
     ctx.moveTo(s.x, s.y);
     ctx.lineTo(t.x, t.y);
@@ -1024,12 +1052,12 @@ function draw() {
       ctx.strokeStyle = "#fafafa";
       ctx.stroke();
     } else if (isUp) {
-      ctx.lineWidth = 1.6 / transform.k;
-      ctx.strokeStyle = "rgba(253,224,71,0.85)";
+      ctx.lineWidth = 1.8 / transform.k;
+      ctx.strokeStyle = "rgba(168,85,247,0.9)";  // 紫色描边 = 上线
       ctx.stroke();
     } else if (isDown) {
-      ctx.lineWidth = 1.2 / transform.k;
-      ctx.strokeStyle = "rgba(125,211,252,0.75)";
+      ctx.lineWidth = 1.4 / transform.k;
+      ctx.strokeStyle = "rgba(251,191,36,0.85)";  // 金色描边 = 下线
       ctx.stroke();
     }
   }
