@@ -32,7 +32,7 @@ GENESIS = "0x2fa1b0fe92286915a78ff073515debe50ab9c05d"
 
 
 def load_pnl() -> dict[str, dict]:
-    """读 v6 盈亏表(已含 钱包总收款 / 分润奖励 / 钱包收款笔数 三列)。
+    """读 v6.2 盈亏表(20 列,含 0.75 折应赔付/综合盈亏对照)。
     v6 cutoff: stake ≤ 5-12 23:59;unstake/钱包收款 ≤ 5-19 23:59 CST。
     已实现盈亏 = 钱包总收款 − stake (含分润口径)。
     """
@@ -45,6 +45,10 @@ def load_pnl() -> dict[str, dict]:
             wallet_in_total = float(r["钱包总收款(USDT)"])
             wallet_in_count = int(r["钱包收款笔数"])
             commission_etc = float(r["分润奖励(USDT)"])
+            # v6.2: 0.75 折应赔付/综合盈亏 (兼容旧版盈亏表 — 列不存在时退化为原版)
+            owed_75 = float(r.get("应赔付总额(0.75折)(USDT)") or r["应赔付总额(USDT)"])
+            interest_75 = float(r.get("应赔付利息(0.75折)(USDT)") or 0)
+            pnl_after_comp_75 = float(r.get("综合盈亏(0.75折)(USDT)") or r["综合盈亏(USDT)"])
             out[a] = {
                 "stake": stake,
                 "unstake": unstake,
@@ -53,6 +57,9 @@ def load_pnl() -> dict[str, dict]:
                 "in_stake": float(r["在stake本金(USDT)"]),
                 "stolen": float(r["疑似被盗本金(USDT)"]),
                 "owed": float(r["应赔付总额(USDT)"]),
+                "owed_75": owed_75,
+                "interest_75": interest_75,
+                "pnl_after_comp_75": pnl_after_comp_75,
                 "wallet_in_total": wallet_in_total,
                 "wallet_in_count": wallet_in_count,
                 "commission_etc": commission_etc,
@@ -129,6 +136,9 @@ def build_graph(parent_map: dict[str, str | None], pnl: dict[str, dict]) -> dict
             "in_stake": p.get("in_stake", 0.0),
             "stolen": p.get("stolen", 0.0),
             "owed": p.get("owed", 0.0),
+            "owed_75": p.get("owed_75", 0.0),
+            "interest_75": p.get("interest_75", 0.0),
+            "pnl_after_comp_75": p.get("pnl_after_comp_75", 0.0),
             "wallet_in_total": p.get("wallet_in_total", 0.0),
             "wallet_in_count": p.get("wallet_in_count", 0),
             "commission_etc": p.get("commission_etc", 0.0),
@@ -529,8 +539,8 @@ function umbrellaAggregate(focusAddr, desc) {
     count_profit: 0,
     count_loss: 0,
     count_stolen: 0,
-    stake: 0, unstake: 0, in_stake: 0, stolen: 0, owed: 0,
-    realized_pnl: 0, pnl_after_comp: 0,
+    stake: 0, unstake: 0, in_stake: 0, stolen: 0, owed: 0, owed_75: 0,
+    realized_pnl: 0, pnl_after_comp: 0, pnl_after_comp_75: 0,
     wallet_in_total: 0, commission_etc: 0, net_cashflow: 0,
   };
   const tally = (n) => {
@@ -539,6 +549,8 @@ function umbrellaAggregate(focusAddr, desc) {
     acc.in_stake += n.in_stake || 0;
     acc.stolen += n.stolen || 0;
     acc.owed += n.owed || 0;
+    acc.owed_75 += n.owed_75 || 0;
+    acc.pnl_after_comp_75 += n.pnl_after_comp_75 || 0;
     acc.realized_pnl += n.pnl || 0;
     acc.pnl_after_comp += n.pnl_after_comp || 0;
     acc.wallet_in_total += n.wallet_in_total || 0;
@@ -599,7 +611,8 @@ function renderPanel(addr, desc) {
       <b>&nbsp;&nbsp;其中分润奖励:</b><span class="right">${fmt(n.commission_etc)} U</span>
       <b>在押本金:</b><span class="right">${fmt(n.in_stake)} U</span>
       <b>疑似被盗本金:</b><span class="right">${fmt(n.stolen)} U</span>
-      <b>应赔付总额:</b><span class="right">${fmt(n.owed)} U</span>
+      <b>应赔付总额 <span style="color:#666;font-weight:normal">(原版)</span>:</b><span class="right">${fmt(n.owed)} U</span>
+      <b>应赔付总额 <span style="color:#666;font-weight:normal">(0.75 折)</span>:</b><span class="right">${fmt(n.owed_75)} U</span>
       <b>已实现盈亏 <span style="color:#666;font-weight:normal">(含分润)</span>:</b><span class="right pnl-${pnlCls}">${n.pnl >= 0 ? "+" : ""}${fmt(n.pnl)} U</span>
     </div>`;
   }
@@ -628,7 +641,8 @@ function renderPanel(addr, desc) {
       <b>&nbsp;&nbsp;其中分润奖励 (伞下):</b><span class="right">${fmt(agg.commission_etc)} U</span>
       <b>在押本金 (伞下):</b><span class="right">${fmt(agg.in_stake)} U</span>
       <b>疑似被盗本金 (伞下):</b><span class="right">${fmt(agg.stolen)} U</span>
-      <b>应赔付总额 (伞下):</b><span class="right">${fmt(agg.owed)} U</span>
+      <b>应赔付 <span style="color:#666;font-weight:normal">(原版, 伞下)</span>:</b><span class="right">${fmt(agg.owed)} U</span>
+      <b>应赔付 <span style="color:#666;font-weight:normal">(0.75 折, 伞下)</span>:</b><span class="right">${fmt(agg.owed_75)} U</span>
       <b>已实现盈亏 <span style="color:#666;font-weight:normal">(含分润, 伞下)</span>:</b><span class="right pnl-${aggPnlCls}">${agg.realized_pnl >= 0 ? "+" : ""}${fmt(agg.realized_pnl)} U</span>
     </div>
   </details>`;
@@ -748,8 +762,9 @@ function buildDetailRows(addr) {
     is_participant: n.is_participant,
     is_top50: n.is_top50,
     stake: n.stake, unstake: n.unstake,
-    in_stake: n.in_stake, stolen: n.stolen, owed: n.owed,
-    realized_pnl: n.pnl, pnl_after_comp: n.pnl_after_comp,
+    in_stake: n.in_stake, stolen: n.stolen,
+    owed: n.owed, owed_75: n.owed_75,
+    realized_pnl: n.pnl, pnl_after_comp: n.pnl_after_comp, pnl_after_comp_75: n.pnl_after_comp_75,
     wallet_in_total: n.wallet_in_total,
     wallet_in_count: n.wallet_in_count,
     commission_etc: n.commission_etc,
@@ -806,7 +821,8 @@ function downloadDetails(addr, fmt) {
       ["钱包收款笔数", focusNode.wallet_in_count, ""],
       ["在押本金 (U)", num(focusNode.in_stake), num(agg.in_stake)],
       ["疑似被盗本金 (U)", num(focusNode.stolen), num(agg.stolen)],
-      ["应赔付总额 (U)", num(focusNode.owed), num(agg.owed)],
+      ["应赔付总额 (原版) (U)", num(focusNode.owed), num(agg.owed)],
+      ["应赔付总额 (0.75 折) (U)", num(focusNode.owed_75), num(agg.owed_75)],
       ["已实现盈亏 含分润 (U)", num(focusNode.pnl), num(agg.realized_pnl)],
     ];
 
@@ -814,7 +830,8 @@ function downloadDetails(addr, fmt) {
       "类型", "层级", "地址", "别名", "深度", "是否Top50",
       "累计stake(U)", "累计unstake(U)",
       "钱包总收款(U)", "钱包收款笔数", "分润奖励(U)",
-      "在押本金(U)", "疑似被盗本金(U)", "应赔付总额(U)",
+      "在押本金(U)", "疑似被盗本金(U)",
+      "应赔付总额(原版)(U)", "应赔付总额(0.75折)(U)",
       "已实现盈亏(含分润)(U)"
     ];
     const rowToArr = (r) => [
@@ -826,7 +843,8 @@ function downloadDetails(addr, fmt) {
       r.is_top50 ? "是" : "",
       num(r.stake), num(r.unstake),
       num(r.wallet_in_total), r.wallet_in_count, num(r.commission_etc),
-      num(r.in_stake), num(r.stolen), num(r.owed),
+      num(r.in_stake), num(r.stolen),
+      num(r.owed), num(r.owed_75),
       num(r.realized_pnl),
     ];
 
@@ -840,7 +858,7 @@ function downloadDetails(addr, fmt) {
     ws1["!cols"] = [{ wch: 22 }, { wch: 48 }, { wch: 22 }];
     XLSX.utils.book_append_sheet(wb, ws1, "摘要");
     const ws2 = XLSX.utils.aoa_to_sheet(upRowsXlsx);
-    ws2["!cols"] = [{wch:6},{wch:6},{wch:46},{wch:14},{wch:6},{wch:7},{wch:13},{wch:13},{wch:13},{wch:10},{wch:13},{wch:12},{wch:14},{wch:13},{wch:18}];
+    ws2["!cols"] = [{wch:6},{wch:6},{wch:46},{wch:14},{wch:6},{wch:7},{wch:13},{wch:13},{wch:13},{wch:10},{wch:13},{wch:12},{wch:14},{wch:14},{wch:14},{wch:18}];
     XLSX.utils.book_append_sheet(wb, ws2, "上线链");
     const ws3 = XLSX.utils.aoa_to_sheet(downRowsXlsx);
     ws3["!cols"] = ws2["!cols"];
@@ -854,7 +872,8 @@ function downloadDetails(addr, fmt) {
       "类型", "层级", "地址", "别名", "在referrer树深度", "是否Genesis", "是否参与者", "是否Top50",
       "累计stake(U)", "累计unstake(U)",
       "钱包总收款(U)", "钱包收款笔数", "分润奖励(U)",
-      "在押本金(U)", "疑似被盗本金(U)", "应赔付总额(U)",
+      "在押本金(U)", "疑似被盗本金(U)",
+      "应赔付总额(原版)(U)", "应赔付总额(0.75折)(U)",
       "已实现盈亏(含分润)(U)"
     ];
     const escape = (v) => {
@@ -878,7 +897,8 @@ function downloadDetails(addr, fmt) {
         r.is_top50 ? "是" : "",
         fmtNum(r.stake), fmtNum(r.unstake),
         fmtNum(r.wallet_in_total), r.wallet_in_count, fmtNum(r.commission_etc),
-        fmtNum(r.in_stake), fmtNum(r.stolen), fmtNum(r.owed),
+        fmtNum(r.in_stake), fmtNum(r.stolen),
+        fmtNum(r.owed), fmtNum(r.owed_75),
         fmtNum(r.realized_pnl),
       ].map(escape).join(","));
     }
@@ -1053,7 +1073,8 @@ ${suspectGroups.length > 0 ? `
 <tr><td><b>净盈亏 (投−拿)</b></td><td class="num" style="color:${pnlColor(agg.realized_pnl)};font-weight:600">${pnlSign(agg.realized_pnl)}</td></tr>
 <tr><td>还锁在合约拿不回的本金(在押)</td><td class="num"><b>${fmtN(agg.in_stake)}</b></td></tr>
 ${agg.stolen > 0 ? `<tr><td>疑似被盗本金(剔除,不赔付)</td><td class="num">${fmtN(agg.stolen)}</td></tr>` : ""}
-<tr><td>v6.1 方案应赔付总额</td><td class="num">${fmtN(agg.owed)}</td></tr>
+<tr><td>v6.2 应赔付总额(原版,32.2% 利息)</td><td class="num">${fmtN(agg.owed)}</td></tr>
+<tr><td>v6.2 应赔付总额(0.75 折,利息再扣 25%)</td><td class="num">${fmtN(agg.owed_75)}</td></tr>
 </table>
 
 <h2>五、${escapeHtml(focusAlias || "焦点本人")} 是怎么赚 ${totalNetCash >= 0 ? "/亏" : ""} 到钱的</h2>
